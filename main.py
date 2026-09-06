@@ -72,6 +72,8 @@ def update_complaint_data(complaint_id, updates):
 # ==========================================
 # 🤖 GEMINI AI ENGINE FUNCTIONS
 # ==========================================
+import time
+
 def ask_gemini(prompt_text, image_bytes=None, system_instruction=""):
     if not client: return "Error: Gemini Client not initialized."
     
@@ -82,22 +84,26 @@ def ask_gemini(prompt_text, image_bytes=None, system_instruction=""):
     USER PROMPT: {prompt_text}
     """
     
-    try:
-        # STRICTLY USING 'gemini-3.6-flash'
-        if image_bytes:
-            response = client.models.generate_content(
-                model='gemini-3.6-flash',
-                contents=[types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'), master_prompt]
-            )
-        else:
-            response = client.models.generate_content(
-                model='gemini-3.6-flash',
-                contents=master_prompt
-            )
-        return response.text
-    except Exception as e:
-        return f"API Error: {str(e)}"
-
+    # 3 Times Auto-Retry Logic for 503 / Server Overload
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            if image_bytes:
+                response = client.models.generate_content(
+                    model='gemini-3.6-flash',
+                    contents=[types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'), master_prompt]
+                )
+            else:
+                response = client.models.generate_content(
+                    model='gemini-3.6-flash',
+                    contents=master_prompt
+                )
+            return response.text
+        except Exception as e:
+            if "503" in str(e) and attempt < max_retries - 1:
+                time.sleep(2)  # Server overload hone par 2 second wait karke fir try karega
+                continue
+            return f"API Error: {str(e)}"
 def get_official_email(target_name, level=1):
     target_clean = re.sub(r'[^a-zA-Z0-9\s]', '', target_name).lower().strip()
     email_db = load_email_db()
