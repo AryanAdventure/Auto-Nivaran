@@ -11,14 +11,19 @@ from google.genai import types
 # ⚙️ BACKGROUND API SETTINGS (Backend)
 # ==========================================
 # Yahan apni Gemini API Key paste karein!
-GEMINI_API_KEY = "AQ.Ab8RN6KxLb7kYU6njGcu68iH39gmzZp6FpXRkIHpZQHK38Asfg" 
+# ==========================================
+# ⚙️ BACKGROUND API SETTINGS (Backend)
+# ==========================================
+import os
 
 try:
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    # Streamlit secrets se key fetch karke environment variable set kar rahe hain
+    api_key = st.secrets["GEMINI_API_KEY"]
+    os.environ["GEMINI_API_KEY"] = api_key
+    client = genai.Client()
 except Exception as e:
     client = None
-    st.error("⚠️ Gemini API Key galat hai ya set nahi hai.")
-
+    st.error("⚠️ API Key missing or invalid! Please check Streamlit Secrets.")
 # --- LOCAL DATABASE SETUPS ---
 COMPLAINTS_FILE = "complaints.json"
 EMAILS_DB_FILE = "emails_db.json"
