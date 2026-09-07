@@ -1,438 +1,327 @@
-import streamlit as st
-import json
 import os
-from datetime import datetime
-import urllib.parse 
-import re 
+import json
+import time
+from datetime import datetime, timedelta
+import streamlit as st
 from google import genai
 from google.genai import types
 
 # ==========================================
-# ⚙️ BACKGROUND API SETTINGS (Backend)
+# 1. PAGE CONFIGURATION & ENTERPRISE STYLING
 # ==========================================
-# Yahan apni Gemini API Key paste karein!
+st.set_page_config(
+    page_title="Auto-Nivaran | AI Grievance Platform",
+    page_icon="🛡️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom Enterprise CSS Styling (Navy Blue, Slate Gray, Electric Blue)
+st.markdown("""
+<style>
+    /* Global Styles */
+    .stApp {
+        background-color: #0F172A;
+        color: #F8FAFC;
+        font-family: 'Inter', sans-serif;
+    }
+    
+    /* Header Banner */
+    .main-header {
+        background: linear-gradient(135deg, #0F172A 0%, #1E293B 100%);
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 24px;
+        margin-bottom: 24px;
+        box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
+    }
+    .main-title {
+        color: #0EA5E9;
+        font-size: 32px;
+        font-weight: 700;
+        margin-bottom: 6px;
+    }
+    .main-subtitle {
+        color: #94A3B8;
+        font-size: 15px;
+    }
+
+    /* Metric Cards */
+    .metric-card {
+        background-color: #1E293B;
+        border: 1px solid #334155;
+        border-radius: 10px;
+        padding: 20px;
+        text-align: center;
+    }
+    .metric-value {
+        font-size: 28px;
+        font-weight: 700;
+        color: #38BDF8;
+    }
+    .metric-label {
+        font-size: 13px;
+        color: #94A3B8;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    /* Status Badges */
+    .badge-l1 {
+        background-color: #0284C7;
+        color: #FFFFFF;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 600;
+    }
+    .badge-l2 {
+        background-color: #DC2626;
+        color: #FFFFFF;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 600;
+    }
+    .badge-closed {
+        background-color: #16A34A;
+        color: #FFFFFF;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 600;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # ==========================================
-# ⚙️ BACKGROUND API SETTINGS (Backend)
+# 2. GEMINI CLIENT INITIALIZATION
 # ==========================================
-import os
+@st.cache_resource
+def get_gemini_client():
+    """Initialize Google GenAI client securely using Streamlit Secrets or Environment Variables."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key and "GEMINI_API_KEY" in st.secrets:
+        api_key = st.secrets["GEMINI_API_KEY"]
+        os.environ["GEMINI_API_KEY"] = api_key
+    
+    if not api_key:
+        return None
+    
+    try:
+        return genai.Client()
+    except Exception as e:
+        st.error(f"Failed to initialize Gemini Client: {e}")
+        return None
 
-try:
-    # Streamlit secrets se key fetch karke environment variable set kar rahe hain
-    api_key = st.secrets["GEMINI_API_KEY"]
-    os.environ["GEMINI_API_KEY"] = api_key
-    client = genai.Client()
-except Exception as e:
-    client = None
-    st.error("⚠️ API Key missing or invalid! Please check Streamlit Secrets.")
-# --- LOCAL DATABASE SETUPS ---
-COMPLAINTS_FILE = "complaints.json"
-EMAILS_DB_FILE = "emails_db.json"
+client = get_gemini_client()
 
-def load_email_db():
-    if os.path.exists(EMAILS_DB_FILE):
-        try:
-            with open(EMAILS_DB_FILE, "r") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_to_email_db(brand_or_dept, email):
-    db = load_email_db()
-    key = re.sub(r'[^a-zA-Z0-9\s]', '', brand_or_dept).lower().strip()
-    if key and email and "@" in email:
-        db[key] = email.strip()
-        with open(EMAILS_DB_FILE, "w") as f:
-            json.dump(db, f, indent=4)
-
-def load_complaints():
-    if os.path.exists(COMPLAINTS_FILE):
-        try:
-            with open(COMPLAINTS_FILE, "r") as f:
-                return json.load(f)
-        except:
-            return []
-    return []
-
-def save_complaint(complaint_data):
-    complaints = load_complaints()
-    complaints.append(complaint_data)
-    with open(COMPLAINTS_FILE, "w") as f:
-        json.dump(complaints, f, indent=4)
-
-def update_complaint_data(complaint_id, updates):
-    complaints = load_complaints()
-    for c in complaints:
-        if c["id"] == complaint_id:
-            c.update(updates)
-            break
-    with open(COMPLAINTS_FILE, "w") as f:
-        json.dump(complaints, f, indent=4)
-
-# ==========================================
-# 🤖 GEMINI AI ENGINE FUNCTIONS
-# ==========================================
-import time
-
-def ask_gemini(prompt_text, image_bytes=None, system_instruction=""):
-    if not client: return "Error: Gemini Client not initialized."
+# High-Resilience Gemini Call with Exponential Backoff for 503 Errors
+def call_gemini_lite(prompt_text, system_instruction=""):
+    """
+    Calls gemini-3.5-flash-lite with automated retries for 503 Service Congestion errors.
+    """
+    if not client:
+        return "⚠️ API Client error: GEMINI_API_KEY is not configured in secrets."
     
     master_prompt = f"""
-    STRICT SYSTEM INSTRUCTIONS: {system_instruction}
-    CRITICAL RULE: DO NOT hallucinate or invent Ticket IDs, Dates, or Email Addresses. If a Ticket ID is not provided in the prompt, ask the user for it.
+    STRICT SYSTEM RULE: {system_instruction}
+    CRITICAL RULE: DO NOT hallucinate fake ticket IDs, dates, or details.
     
     USER PROMPT: {prompt_text}
     """
     
-    # 3 Times Auto-Retry Logic for 503 / Server Overload
     max_retries = 3
+    backoff_delay = 1.5  # seconds
+    
     for attempt in range(max_retries):
         try:
-            if image_bytes:
-                response = client.models.generate_content(
-                    model='gemini-3.6-flash',
-                    contents=[types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'), master_prompt]
-                )
-            else:
-                response = client.models.generate_content(
-                    model='gemini-3.6-flash',
-                    contents=master_prompt
-                )
+            response = client.models.generate_content(
+                model='gemini-3.5-flash-lite',
+                contents=master_prompt
+            )
             return response.text
         except Exception as e:
-            if "503" in str(e) and attempt < max_retries - 1:
-                time.sleep(2)  # Server overload hone par 2 second wait karke fir try karega
-                continue
-            return f"API Error: {str(e)}"
-def get_official_email(target_name, level=1):
-    target_clean = re.sub(r'[^a-zA-Z0-9\s]', '', target_name).lower().strip()
-    email_db = load_email_db()
-    
-    if level == 1:
-        for key, email in email_db.items():
-            if key in target_clean or target_clean in key:
-                return email
-
-    role = "Customer Support" if level == 1 else "Grievance / Nodal Officer"
-    prompt = f"What is the official {role} email address for '{target_name}' in India? Reply ONLY with the exact email address. Do not hallucinate."
-    
-    res_text = ask_gemini(prompt)
-    match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', res_text)
-    
-    if match:
-        found_email = match.group(0)
-        if level == 1:
-            save_to_email_db(target_name, found_email)
-        return found_email
-    
-    prefix = "support" if level == 1 else "grievance"
-    return f"{prefix}@{target_clean.replace(' ', '')}.com"
-
-def clean_llm_response(text):
-    return re.sub(r'^(Here is|Sure|Certainly|Here\'s|Below is)[^\n]*\n+', '', text, flags=re.IGNORECASE).strip()
+            err_msg = str(e)
+            if "503" in err_msg or "overloaded" in err_msg.lower():
+                if attempt < max_retries - 1:
+                    time.sleep(backoff_delay * (attempt + 1))
+                    continue
+            return f"⚠️ API Error ({err_msg}). Retried {attempt+1} times."
 
 # ==========================================
-# 🎨 UI CONFIGURATION & THEME (OPTION A)
+# 3. LOCAL PERSISTENCE & SLA LOGIC ENGINE
 # ==========================================
-st.set_page_config(page_title="Auto-Nivaran AI", page_icon="⚖️", layout="wide")
+DB_FILE = "complaints.json"
 
-# Option A: Clean & Trustworthy Custom CSS
+def load_complaints():
+    if not os.path.exists(DB_FILE):
+        return []
+    try:
+        with open(DB_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_complaints(data):
+    with open(DB_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+def process_sla_rules(complaints):
+    """
+    Calculates SLA breaches & auto-escalates based on mathematical rules:
+    - SLA Breach (>48h) -> Escalates L1 to L2 Nodal Officer.
+    - Auto Close (>168h) -> Marks inactive/resolved cases as Closed.
+    """
+    now = datetime.now()
+    updated = False
+    
+    for item in complaints:
+        filed_time = datetime.fromisoformat(item["timestamp"])
+        elapsed_hours = (now - filed_time).total_seconds() / 3600.0
+        item["elapsed_hours"] = round(elapsed_hours, 1)
+        
+        # Rule 1: 48-Hour SLA Breach Escalation
+        if elapsed_hours >= 48.0 and item["status"] == "Level 1 Active":
+            item["status"] = "Level 2 Escalated"
+            item["escalated_at"] = now.isoformat()
+            updated = True
+            
+        # Rule 2: 168-Hour Auto-Closure Window
+        if elapsed_hours >= 168.0 and item["status"] in ["Resolved", "Level 1 Active"]:
+            item["status"] = "Closed"
+            updated = True
+            
+    if updated:
+        save_complaints(complaints)
+    return complaints
+
+# Initialize DB Data
+complaints_data = load_complaints()
+complaints_data = process_sla_rules(complaints_data)
+
+# ==========================================
+# 4. USER INTERFACE
+# ==========================================
+
+# Header Banner
 st.markdown("""
-    <style>
-    /* Background and global text */
-    .stApp {
-        background-color: #F8F9FA;
-        color: #2C3E50;
-    }
-    
-    /* Headers */
-    h1, h2, h3 {
-        color: #0F4C81 !important;
-        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    }
-    
-    /* Primary Navy Blue Buttons */
-    div.stButton > button:first-child {
-        background-color: #0F4C81;
-        color: white;
-        border: none;
-        border-radius: 6px;
-        padding: 0.5rem 1.5rem;
-        font-weight: 600;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        transition: all 0.3s ease;
-    }
-    div.stButton > button:first-child:hover {
-        background-color: #1A365D;
-        box-shadow: 0 6px 10px rgba(0,0,0,0.15);
-        transform: translateY(-1px);
-    }
-    
-    /* Inputs and Text Areas - Clean Borders */
-    .stTextInput>div>div>input, .stTextArea>div>div>textarea {
-        border-radius: 6px;
-        border: 1px solid #CBD5E1;
-        background-color: #FFFFFF;
-        color: #1E293B;
-    }
-    
-    /* Tabs Styling */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 20px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        white-space: pre-wrap;
-        background-color: transparent;
-        border-radius: 4px 4px 0px 0px;
-        gap: 1px;
-        padding-top: 10px;
-        padding-bottom: 10px;
-        color: #475569;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #FFFFFF;
-        color: #0F4C81;
-        border-bottom: 3px solid #0F4C81;
-        font-weight: bold;
-    }
-    
-    /* Chat Form Container Shadow */
-    div[data-testid="stForm"] {
-        background-color: #FFFFFF;
-        border-radius: 8px;
-        padding: 15px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-        border: 1px solid #E2E8F0;
-    }
-    
-    /* Expander styling for Dashboard */
-    .streamlit-expanderHeader {
-        background-color: #FFFFFF;
-        border-radius: 6px;
-        color: #1E293B;
-        border: 1px solid #E2E8F0;
-        font-weight: 500;
-    }
-    </style>
+<div class="main-header">
+    <div class="main-title">🛡️ Auto-Nivaran Dashboard</div>
+    <div class="main-subtitle">AI-Powered Consumer Grievance Escalation & Real-Time SLA Tracking Platform</div>
+</div>
 """, unsafe_allow_html=True)
 
-st.title("⚖️ Auto-Nivaran: Smart Grievance Assistant")
+# Top Metric Row
+total_count = len(complaints_data)
+l1_count = sum(1 for c in complaints_data if c["status"] == "Level 1 Active")
+l2_count = sum(1 for c in complaints_data if c["status"] == "Level 2 Escalated")
+closed_count = sum(1 for c in complaints_data if c["status"] == "Closed")
 
-# Initialize session states
-if "draft_ready" not in st.session_state:
-    st.session_state.draft_ready = False
-if "desc_input" not in st.session_state:
-    st.session_state.desc_input = ""
-if "chat_messages" not in st.session_state:
-    st.session_state.chat_messages = [{"role": "assistant", "content": "Namaste! Apni problem yahan short mein batayein. Agar aapka koi purana ticket hai, toh kripya apna Ticket ID zaroor batayein."}]
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.markdown(f'<div class="metric-card"><div class="metric-value">{total_count}</div><div class="metric-label">Total Grievances</div></div>', unsafe_allow_html=True)
+with col2:
+    st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#38BDF8;">{l1_count}</div><div class="metric-label">L1 Active</div></div>', unsafe_allow_html=True)
+with col3:
+    st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#EF4444;">{l2_count}</div><div class="metric-label">L2 SLA Breached</div></div>', unsafe_allow_html=True)
+with col4:
+    st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#22C55E;">{closed_count}</div><div class="metric-label">Resolved / Closed</div></div>', unsafe_allow_html=True)
 
-tab1, tab2 = st.tabs(["📝 File Complaint & AI Help", "📊 SLA Dashboard (Auto-Escalation)"])
+st.write("---")
 
-# ------------------------------------------
-# TAB 1: FILE NEW COMPLAINT & INLINE AI CHAT
-# ------------------------------------------
+# Navigation Tabs
+tab1, tab2, tab3 = st.tabs(["📝 File New Grievance", "📊 Live Complaint Tracker & Escalation Engine", "🤖 AI Resolution Assistant"])
+
+# TAB 1: FILE GRIEVANCE
 with tab1:
-    if not st.session_state.draft_ready:
-        col_n, col_c = st.columns(2)
-        with col_n:
-            user_name = st.text_input("👤 Your Full Name:")
-        with col_c:
-            user_contact = st.text_input("📞 Contact Number:")
-
-        uploaded_file = st.file_uploader("Upload Attachments (Images, Bills, etc.)", type=["png", "jpg", "jpeg"])
-        location_input = st.text_input("📍 Brand / Department (e.g., PWD Ghaziabad, boAt):")
-        
-        selected_date = st.date_input("Date", datetime.now().date())
-        time_str = f"{selected_date} {datetime.now().time().strftime('%H:%M:%S')}"
-        
-        st.markdown("<hr>", unsafe_allow_html=True)
-        
-        # --- 🤖 INLINE AI CHAT SECTION ---
-        st.markdown("### 🤖 AI Assistant (Chat & Auto-Fill)")
-        
-        chat_box = st.container(height=220)
-        with chat_box:
-            for msg in st.session_state.chat_messages:
-                if msg["role"] == "assistant":
-                    st.info(f"🤖 **AI:** {msg['content']}")
-                else:
-                    st.success(f"👤 **You:** {msg['content']}")
-        
-        with st.form(key="chat_form", clear_on_submit=True):
-            col_in, col_btn = st.columns([5, 1])
-            with col_in:
-                user_msg = st.text_input("Chat with AI...", label_visibility="collapsed", placeholder="Jaise: Mera fan kal se kaam nahi kar raha hai...")
-            with col_btn:
-                send_btn = st.form_submit_button("Send 🚀")
-        
-        if send_btn and user_msg:
-            st.session_state.chat_messages.append({"role": "user", "content": user_msg})
+    st.subheader("Submit Consumer Complaint")
+    with st.form("grievance_form", clear_on_submit=True):
+        col_a, col_b = st.columns(2)
+        with col_a:
+            consumer_name = st.text_input("Consumer Name", placeholder="e.g. Rahul Sharma")
+            category = st.selectbox("Category", ["Banking & Finance", "E-Commerce & Delivery", "Telecommunications", "Public Utilities", "Other Services"])
+        with col_b:
+            email = st.text_input("Email Address", placeholder="rahul@example.com")
+            priority = st.select_slider("Priority Level", options=["Low", "Medium", "High", "Critical"])
             
-            prompt_string = "Conversation:\n"
-            for m in st.session_state.chat_messages[-4:]: 
-                role = "User" if m["role"] == "user" else "AI"
-                prompt_string += f"{role}: {m['content']}\n"
-            
-            sys_instruct = "You are Auto-Nivaran AI helping an Indian consumer. Talk politely in Hinglish. If they mention an existing complaint, ask for the Ticket ID. Do not invent one."
-            
-            with st.spinner("🧠 AI is typing..."):
-                ai_reply = ask_gemini(prompt_string, system_instruction=sys_instruct)
-                st.session_state.chat_messages.append({"role": "assistant", "content": ai_reply})
-            st.rerun()
-
-        if len(st.session_state.chat_messages) > 1:
-            if st.button("✨ Auto-Fill Description", type="primary"):
-                with st.spinner("📝 Writing professional description..."):
-                    history = " ".join([m['content'] for m in st.session_state.chat_messages if m["role"] == "user"])
-                    fill_prompt = f"Based on this user problem: '{history}', write a highly formal 2-3 line problem description in English suitable for a grievance complaint form."
-                    generated_desc = ask_gemini(fill_prompt)
-                    st.session_state.desc_input = clean_llm_response(generated_desc)
-                st.rerun()
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        user_problem = st.text_area("✍️ Describe the issue:", key="desc_input", height=120)
-
-        if st.button("🚀 Process Grievance (Level 1)"):
-            if not user_name or not user_contact:
-                st.error("⚠️ Please enter Name and Contact Number.")
-            elif uploaded_file or (st.session_state.desc_input and location_input):
-                with st.spinner("🧠 Gemini AI is drafting Level 1 email..."):
-                    target_email = get_official_email(location_input, level=1)
-                    img_bytes = uploaded_file.getvalue() if uploaded_file else None
-                    draft_prompt = f"Draft a formal grievance email to '{location_input}'. Issue: '{st.session_state.desc_input}'. Name: {user_name}, Contact: {user_contact}. Output ONLY the email body starting with 'Subject:'."
-                    
-                    draft_text = ask_gemini(draft_prompt, img_bytes)
-
-                    st.session_state.draft_ready = True
-                    st.session_state.draft = clean_llm_response(draft_text)
-                    st.session_state.target_email = target_email
-                    st.session_state.location = location_input
-                    st.session_state.user_name = user_name
-                    st.session_state.user_contact = user_contact
-                    st.session_state.time_str = time_str
-                    st.rerun()
+        complaint_text = st.text_area("Detailed Grievance Description", placeholder="Describe your issue in detail...", height=120)
+        submit_btn = st.form_submit_button("Submit Complaint & Initialize SLA Clock")
+        
+        if submit_btn:
+            if not consumer_name or not complaint_text:
+                st.warning("Please fill in all mandatory fields.")
             else:
-                st.error("⚠️ Describe the issue to proceed.")
+                with st.spinner("AI Categorizing & Analyzing Grievance via Gemini 3.5 Flash-Lite..."):
+                    system_prompt = "You are an expert grievance classifier. Provide a concise 2-sentence executive summary and 3 key action steps for resolving this grievance."
+                    ai_analysis = call_gemini_lite(f"Grievance Category: {category}\nDetails: {complaint_text}", system_instruction=system_prompt)
+                    
+                    ticket_id = f"AN-{int(time.time())}"
+                    new_complaint = {
+                        "ticket_id": ticket_id,
+                        "consumer_name": consumer_name,
+                        "email": email,
+                        "category": category,
+                        "priority": priority,
+                        "description": complaint_text,
+                        "ai_summary": ai_analysis,
+                        "timestamp": datetime.now().isoformat(),
+                        "status": "Level 1 Active",
+                        "elapsed_hours": 0.0
+                    }
+                    
+                    complaints_data.append(new_complaint)
+                    save_complaints(complaints_data)
+                    
+                    st.success(f"✅ Grievance Registered Successfully! Ticket ID: **{ticket_id}**")
+                    st.markdown(f"**AI Initial Assessment:**\n{ai_analysis}")
 
-    else:
-        st.success("✅ Level 1 Draft Complete!")
-        
-        st.markdown("### 🎯 Target Email (Editable)")
-        updated_email = st.text_input("Email ID:", value=st.session_state.target_email)
-        if updated_email != st.session_state.target_email:
-            st.session_state.target_email = updated_email
-            save_to_email_db(st.session_state.location, updated_email)
-            
-        with st.expander("👀 View Level 1 Draft"):
-            st.text(st.session_state.draft)
-
-        mail_subject = urllib.parse.quote(f"Formal Grievance: {st.session_state.location}")
-        mail_body = urllib.parse.quote(st.session_state.draft)
-        mailto_url = f"mailto:{st.session_state.target_email}?subject={mail_subject}&body={mail_body}"
-        
-        if st.link_button(f"✉️ Open Mail App & Send", mailto_url, type="primary"):
-            complaint_obj = {
-                "id": f"TKT-{int(datetime.now().timestamp())}", 
-                "name": st.session_state.user_name,
-                "contact": st.session_state.user_contact,
-                "location": st.session_state.location,
-                "email": st.session_state.target_email,
-                "date": st.session_state.time_str,
-                "description": st.session_state.desc_input, 
-                "status": "Pending",
-                "level": 1,
-                "sla_hours": 48
-            }
-            save_complaint(complaint_obj)
-            st.toast("✅ Saved to Dashboard with Generated Ticket ID!")
-
-        if st.button("🔄 File Another Complaint"):
-            st.session_state.draft_ready = False
-            st.session_state.desc_input = "" 
-            st.rerun()
-
-# ------------------------------------------
-# TAB 2: LEVEL 2 ESCALATION & SLA TRACKING
-# ------------------------------------------
+# TAB 2: LIVE TRACKER & SLA ESCALATION
 with tab2:
-    st.header("📊 SLA Tracking & Actions")
-    st.caption("Track 48-hour SLA. Extend time or auto-generate Level 2 Escalation.")
-    complaints = load_complaints()
+    st.subheader("Real-Time SLA & Escalation Dashboard")
     
-    if not complaints:
-        st.info("No active complaints tracked yet.")
+    if not complaints_data:
+        st.info("No active grievances found in the system.")
     else:
-        for c in reversed(complaints):
-            created_at = datetime.strptime(c["date"], "%Y-%m-%d %H:%M:%S")
-            allowed_hours = c.get("sla_hours", 48)
-            time_elapsed = datetime.now() - created_at
-            hours_passed = time_elapsed.total_seconds() / 3600
-            
-            # --- AUTO-CLOSE LOGIC (7 DAYS / 168 HOURS NO RESPONSE) ---
-            if "Pending" in c["status"] and hours_passed >= (allowed_hours + 168):
-                update_complaint_data(c["id"], {"status": "Auto-Closed (No Response)"})
-                st.rerun()
-            
-            status_color = "🟢" if "Resolved" in c["status"] or "Closed" in c["status"] else ("🔴" if hours_passed >= allowed_hours else "🟡")
-            
-            with st.expander(f"{status_color} ID: {c['id']} | Target: {c['location']} | Status: {c['status']}"):
-                st.write(f"**Level:** {c.get('level', 1)} | **Time Elapsed:** {round(hours_passed, 1)} / {allowed_hours} Hrs allowed")
-                st.write(f"**Original Issue:** {c.get('description', 'No description found.')}")
-
-                # 48 HOURS CROSS HONE PAR YE 3 BUTTONS DIKHENGE
-                if "Pending" in c["status"] and hours_passed >= allowed_hours:
-                    st.error("🚨 **SLA BREACHED! Action Required.**")
-                    st.warning("⚠️ Agar 7 din tak action nahi liya gaya, toh yeh ticket auto-close ho jayega.")
-                    
-                    # 3 Buttons Layout
-                    col1, col2, col3 = st.columns(3)
-                    
-                    # BUTTON 1: SOLVED
-                    with col1:
-                        if st.button("✅ Solved", key=f"sol_{c['id']}"):
-                            update_complaint_data(c["id"], {"status": "Resolved"})
-                            st.rerun()
-                    
-                    # BUTTON 2: EXTEND TIME
-                    with col2:
-                        with st.popover("⏳ Extend Time"):
-                            st.write("Agar company ne aur time manga hai:")
-                            extra_days = st.number_input("Kitne din (Days)?", min_value=1, value=3, key=f"num_{c['id']}")
-                            if st.button("Update Time", key=f"ext_{c['id']}"):
-                                extra_hours = extra_days * 24
-                                update_complaint_data(c["id"], {
-                                    "sla_hours": c.get("sla_hours", 48) + extra_hours, 
-                                    "status": "Pending" 
-                                })
-                                st.rerun()
-                    
-                    # BUTTON 3: ESCALATE LEVEL 2
-                    with col3:
-                        if st.button("❌ Escalate", key=f"esc_{c['id']}"):
-                            with st.spinner("🧠 AI fetching Nodal Officer & Drafting Legal Warning..."):
-                                nodal_email = get_official_email(c['location'], level=2)
-                                l2_sys_instruct = "You are drafting a legal escalation warning. Do NOT invent data. Use EXACTLY the provided Ticket ID and details."
-                                l2_prompt = f"""
-                                Draft a strict Level 2 Escalation Email to the Grievance/Nodal Officer of {c['location']}.
-                                
-                                YOU MUST INCLUDE THIS HISTORY:
-                                - Previous Ticket ID: {c['id']}
-                                - Date of 1st Complaint: {c['date']}
-                                - Name: {c['name']}
-                                - Core Issue: {c.get('description', 'Defective product/service')}
-                                
-                                Tone: Highly formal, mention SLA breach, state that Level 1 was unresponsive, and threaten escalation to Consumer Court / NCH if not resolved in 24 hours. Output ONLY the email body starting with 'Subject:'.
-                                """
-                                l2_draft = ask_gemini(l2_prompt, system_instruction=l2_sys_instruct)
-                                clean_l2_draft = clean_llm_response(l2_draft)
-                                
-                                update_complaint_data(c["id"], {"status": "Escalated Level 2", "level": 2, "sla_hours": c.get("sla_hours", 48) + 48})
-                                
-                                mail_subject = urllib.parse.quote(f"URGENT ESCALATION: SLA Breached for Ticket {c['id']}")
-                                mail_body = urllib.parse.quote(clean_l2_draft + "\n\n--- PLEASE ATTACH PREVIOUS SCREENSHOTS / BILLS HERE ---")
-                                st.link_button("✉️ Open Mail & Send Level 2 Warning", f"mailto:{nodal_email}?subject={mail_subject}&body={mail_body}", type="primary")
-                                st.rerun()
+        for item in complaints_data:
+            badge_class = "badge-l1"
+            if item["status"] == "Level 2 Escalated":
+                badge_class = "badge-l2"
+            elif item["status"] == "Closed":
+                badge_class = "badge-closed"
                 
-                elif "Pending" in c["status"]:
-                    st.info(f"⏳ SLA is active. Options will appear after {allowed_hours} hours.")
+            with st.expander(f"🎫 Ticket #{item['ticket_id']} — {item['category']} ({item['consumer_name']})"):
+                col_x, col_y = st.columns([2, 1])
+                with col_x:
+                    st.markdown(f"**Description:** {item['description']}")
+                    st.markdown(f"**AI Analysis:** {item.get('ai_summary', 'N/A')}")
+                with col_y:
+                    st.markdown(f"**Status:** <span class='{badge_class}'>{item['status']}</span>", unsafe_allow_html=True)
+                    st.write(f"**Filed Time:** {item['timestamp'][:16].replace('T', ' ')}")
+                    st.write(f"**Elapsed Time:** `{item.get('elapsed_hours', 0)} hrs`")
+                    st.write(f"**Priority:** `{item['priority']}`")
+
+# TAB 3: AI RESOLUTION ASSISTANT
+with tab3:
+    st.subheader("AI Assistant & Resolution Generator")
+    ticket_query = st.text_input("Enter Ticket ID to Generate Redressal Response", placeholder="e.g. AN-1725732000")
+    
+    if st.button("Generate Resolution Letter"):
+        matched = next((c for c in complaints_data if c["ticket_id"] == ticket_query.strip()), None)
+        if not matched:
+            st.error("Ticket ID not found in local database. Anti-hallucination guardrail active.")
+        else:
+            with st.spinner("Generating official resolution letter via Gemini 3.5 Flash-Lite..."):
+                prompt = f"""
+                Draft a professional resolution letter for:
+                Ticket ID: {matched['ticket_id']}
+                Consumer Name: {matched['consumer_name']}
+                Category: {matched['category']}
+                Issue: {matched['description']}
+                Current Status: {matched['status']}
+                
+                Ensure the response is empathetic, authoritative, and strictly addresses the user's issue without making fake commitments.
+                """
+                response_text = call_gemini_lite(prompt, system_instruction="Draft official consumer redressal response.")
+                st.markdown("### Generated Response Draft:")
+                st.info(response_text)
