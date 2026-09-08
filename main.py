@@ -4,19 +4,18 @@ import os
 from datetime import datetime
 import urllib.parse 
 import re 
+import time
 from google import genai
 from google.genai import types
 
 # ==========================================
-# ⚙️ BACKGROUND API SETTINGS (Backend)
+# ⚙️ MODEL CONFIGURATION (Flash Lite Model)
 # ==========================================
-# Yahan apni Gemini API Key paste karein!
-# ==========================================
-# ⚙️ BACKGROUND API SETTINGS (Backend)
-# ==========================================
-import os
+MODEL_NAME = "gemini-2.0-flash-lite"
 
-# Streamlit secrets se key uthakar environment me set kar rahe hain
+# ==========================================
+# ⚙️ BACKGROUND API SETTINGS (Backend)
+# ==========================================
 try:
     if "GEMINI_API_KEY" in st.secrets:
         os.environ["GEMINI_API_KEY"] = st.secrets["GEMINI_API_KEY"]
@@ -68,7 +67,7 @@ def save_complaint(complaint_data):
 def update_complaint_data(complaint_id, updates):
     complaints = load_complaints()
     for c in complaints:
-        if c["id"] == complaint_id:
+        if c.get("id") == complaint_id:
             c.update(updates)
             break
     with open(COMPLAINTS_FILE, "w") as f:
@@ -77,8 +76,6 @@ def update_complaint_data(complaint_id, updates):
 # ==========================================
 # 🤖 GEMINI AI ENGINE FUNCTIONS
 # ==========================================
-import time
-
 def ask_gemini(prompt_text, image_bytes=None, system_instruction=""):
     if not client: return "Error: Gemini Client not initialized."
     
@@ -89,24 +86,23 @@ def ask_gemini(prompt_text, image_bytes=None, system_instruction=""):
     USER PROMPT: {prompt_text}
     """
     
-    # 3 Times Auto-Retry Logic for 503 / Server Overload
     max_retries = 3
     for attempt in range(max_retries):
         try:
             if image_bytes:
                 response = client.models.generate_content(
-                    model='gemini-3.6-flash',
+                    model=MODEL_NAME,
                     contents=[types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'), master_prompt]
                 )
             else:
                 response = client.models.generate_content(
-                    model='gemini-3.6-flash',
+                    model=MODEL_NAME,
                     contents=master_prompt
                 )
             return response.text
         except Exception as e:
             if "503" in str(e) and attempt < max_retries - 1:
-                time.sleep(2)  # Server overload hone par 2 second wait karke fir try karega
+                time.sleep(2)
                 continue
             return f"API Error: {str(e)}"
 
@@ -139,26 +135,20 @@ def clean_llm_response(text):
     return re.sub(r'^(Here is|Sure|Certainly|Here\'s|Below is)[^\n]*\n+', '', text, flags=re.IGNORECASE).strip()
 
 # ==========================================
-# 🎨 UI CONFIGURATION & THEME (OPTION A)
+# 🎨 UI CONFIGURATION & THEME
 # ==========================================
 st.set_page_config(page_title="Auto-Nivaran AI", page_icon="⚖️", layout="wide")
 
-# Option A: Clean & Trustworthy Custom CSS
 st.markdown("""
     <style>
-    /* Background and global text */
     .stApp {
         background-color: #F8F9FA;
         color: #2C3E50;
     }
-    
-    /* Headers */
     h1, h2, h3 {
         color: #0F4C81 !important;
         font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     }
-    
-    /* Primary Navy Blue Buttons */
     div.stButton > button:first-child {
         background-color: #0F4C81;
         color: white;
@@ -174,16 +164,12 @@ st.markdown("""
         box-shadow: 0 6px 10px rgba(0,0,0,0.15);
         transform: translateY(-1px);
     }
-    
-    /* Inputs and Text Areas - Clean Borders */
     .stTextInput>div>div>input, .stTextArea>div>div>textarea {
         border-radius: 6px;
         border: 1px solid #CBD5E1;
         background-color: #FFFFFF;
         color: #1E293B;
     }
-    
-    /* Tabs Styling */
     .stTabs [data-baseweb="tab-list"] {
         gap: 20px;
     }
@@ -203,8 +189,6 @@ st.markdown("""
         border-bottom: 3px solid #0F4C81;
         font-weight: bold;
     }
-    
-    /* Chat Form Container Shadow */
     div[data-testid="stForm"] {
         background-color: #FFFFFF;
         border-radius: 8px;
@@ -212,8 +196,6 @@ st.markdown("""
         box-shadow: 0 2px 8px rgba(0,0,0,0.05);
         border: 1px solid #E2E8F0;
     }
-    
-    /* Expander styling for Dashboard */
     .streamlit-expanderHeader {
         background-color: #FFFFFF;
         border-radius: 6px;
@@ -255,7 +237,6 @@ with tab1:
         
         st.markdown("<hr>", unsafe_allow_html=True)
         
-        # --- 🤖 INLINE AI CHAT SECTION ---
         st.markdown("### 🤖 AI Assistant (Chat & Auto-Fill)")
         
         chat_box = st.container(height=220)
@@ -371,62 +352,81 @@ with tab2:
         st.info("No active complaints tracked yet.")
     else:
         for c in reversed(complaints):
-            created_at = datetime.strptime(c["date"], "%Y-%m-%d %H:%M:%S")
+            complaint_id = c.get("id", "UNKNOWN_ID")
+            status = c.get("status", "Pending")
+            location = c.get("location", "Unknown Location")
+            
+            # --- SAFE DATE PARSING FIX ---
+            date_str = c.get("date")
+            created_at = None
+            if date_str:
+                try:
+                    created_at = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    try:
+                        created_at = datetime.fromisoformat(date_str)
+                    except Exception:
+                        created_at = None
+            
+            if not created_at:
+                created_at = datetime.now()  # Date missing hone par app crash hone se rokega
+
             allowed_hours = c.get("sla_hours", 48)
             time_elapsed = datetime.now() - created_at
             hours_passed = time_elapsed.total_seconds() / 3600
             
             # --- AUTO-CLOSE LOGIC (7 DAYS / 168 HOURS NO RESPONSE) ---
-            if "Pending" in c["status"] and hours_passed >= (allowed_hours + 168):
-                update_complaint_data(c["id"], {"status": "Auto-Closed (No Response)"})
+            if "Pending" in status and hours_passed >= (allowed_hours + 168):
+                update_complaint_data(complaint_id, {"status": "Auto-Closed (No Response)"})
                 st.rerun()
             
-            status_color = "🟢" if "Resolved" in c["status"] or "Closed" in c["status"] else ("🔴" if hours_passed >= allowed_hours else "🟡")
+            status_color = "🟢" if ("Resolved" in status or "Closed" in status) else ("🔴" if hours_passed >= allowed_hours else "🟡")
             
-            with st.expander(f"{status_color} ID: {c['id']} | Target: {c['location']} | Status: {c['status']}"):
+            with st.expander(f"{status_color} ID: {complaint_id} | Target: {location} | Status: {status}"):
                 st.write(f"**Level:** {c.get('level', 1)} | **Time Elapsed:** {round(hours_passed, 1)} / {allowed_hours} Hrs allowed")
                 st.write(f"**Original Issue:** {c.get('description', 'No description found.')}")
 
-                # 48 HOURS CROSS HONE PAR YE 3 BUTTONS DIKHENGE
-                if "Pending" in c["status"] and hours_passed >= allowed_hours:
+                # Level 2 Escalation Mail Link Persistence
+                if c.get("escalation_mailto"):
+                    st.success("✉️ Level 2 Escalation Draft Ready!")
+                    st.link_button("✉️ Open Mail & Send Level 2 Warning", c["escalation_mailto"], type="primary")
+
+                # 48 HOURS CROSS HONE PAR OPTIONS DIKHENGE
+                elif "Pending" in status and hours_passed >= allowed_hours:
                     st.error("🚨 **SLA BREACHED! Action Required.**")
                     st.warning("⚠️ Agar 7 din tak action nahi liya gaya, toh yeh ticket auto-close ho jayega.")
                     
-                    # 3 Buttons Layout
                     col1, col2, col3 = st.columns(3)
                     
-                    # BUTTON 1: SOLVED
                     with col1:
-                        if st.button("✅ Solved", key=f"sol_{c['id']}"):
-                            update_complaint_data(c["id"], {"status": "Resolved"})
+                        if st.button("✅ Solved", key=f"sol_{complaint_id}"):
+                            update_complaint_data(complaint_id, {"status": "Resolved"})
                             st.rerun()
                     
-                    # BUTTON 2: EXTEND TIME
                     with col2:
                         with st.popover("⏳ Extend Time"):
                             st.write("Agar company ne aur time manga hai:")
-                            extra_days = st.number_input("Kitne din (Days)?", min_value=1, value=3, key=f"num_{c['id']}")
-                            if st.button("Update Time", key=f"ext_{c['id']}"):
+                            extra_days = st.number_input("Kitne din (Days)?", min_value=1, value=3, key=f"num_{complaint_id}")
+                            if st.button("Update Time", key=f"ext_{complaint_id}"):
                                 extra_hours = extra_days * 24
-                                update_complaint_data(c["id"], {
+                                update_complaint_data(complaint_id, {
                                     "sla_hours": c.get("sla_hours", 48) + extra_hours, 
                                     "status": "Pending" 
                                 })
                                 st.rerun()
                     
-                    # BUTTON 3: ESCALATE LEVEL 2
                     with col3:
-                        if st.button("❌ Escalate", key=f"esc_{c['id']}"):
+                        if st.button("❌ Escalate", key=f"esc_{complaint_id}"):
                             with st.spinner("🧠 AI fetching Nodal Officer & Drafting Legal Warning..."):
-                                nodal_email = get_official_email(c['location'], level=2)
+                                nodal_email = get_official_email(location, level=2)
                                 l2_sys_instruct = "You are drafting a legal escalation warning. Do NOT invent data. Use EXACTLY the provided Ticket ID and details."
                                 l2_prompt = f"""
-                                Draft a strict Level 2 Escalation Email to the Grievance/Nodal Officer of {c['location']}.
+                                Draft a strict Level 2 Escalation Email to the Grievance/Nodal Officer of {location}.
                                 
                                 YOU MUST INCLUDE THIS HISTORY:
-                                - Previous Ticket ID: {c['id']}
-                                - Date of 1st Complaint: {c['date']}
-                                - Name: {c['name']}
+                                - Previous Ticket ID: {complaint_id}
+                                - Date of 1st Complaint: {c.get('date', 'N/A')}
+                                - Name: {c.get('name', 'User')}
                                 - Core Issue: {c.get('description', 'Defective product/service')}
                                 
                                 Tone: Highly formal, mention SLA breach, state that Level 1 was unresponsive, and threaten escalation to Consumer Court / NCH if not resolved in 24 hours. Output ONLY the email body starting with 'Subject:'.
@@ -434,12 +434,17 @@ with tab2:
                                 l2_draft = ask_gemini(l2_prompt, system_instruction=l2_sys_instruct)
                                 clean_l2_draft = clean_llm_response(l2_draft)
                                 
-                                update_complaint_data(c["id"], {"status": "Escalated Level 2", "level": 2, "sla_hours": c.get("sla_hours", 48) + 48})
-                                
-                                mail_subject = urllib.parse.quote(f"URGENT ESCALATION: SLA Breached for Ticket {c['id']}")
+                                mail_subject = urllib.parse.quote(f"URGENT ESCALATION: SLA Breached for Ticket {complaint_id}")
                                 mail_body = urllib.parse.quote(clean_l2_draft + "\n\n--- PLEASE ATTACH PREVIOUS SCREENSHOTS / BILLS HERE ---")
-                                st.link_button("✉️ Open Mail & Send Level 2 Warning", f"mailto:{nodal_email}?subject={mail_subject}&body={mail_body}", type="primary")
+                                mailto_link = f"mailto:{nodal_email}?subject={mail_subject}&body={mail_body}"
+                                
+                                update_complaint_data(complaint_id, {
+                                    "status": "Escalated Level 2", 
+                                    "level": 2, 
+                                    "sla_hours": c.get("sla_hours", 48) + 48,
+                                    "escalation_mailto": mailto_link
+                                })
                                 st.rerun()
                 
-                elif "Pending" in c["status"]:
+                elif "Pending" in status:
                     st.info(f"⏳ SLA is active. Options will appear after {allowed_hours} hours.")
