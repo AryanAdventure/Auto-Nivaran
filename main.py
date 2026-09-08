@@ -11,7 +11,7 @@ from google.genai import types
 # ==========================================
 # ⚙️ MODEL CONFIGURATION (Flash Lite Model)
 # ==========================================
-MODEL_NAME = "gemini-2.0-flash-lite"
+MODEL_NAME = "gemini-3.5-flash-lite"
 
 # ==========================================
 # ⚙️ BACKGROUND API SETTINGS (Backend)
